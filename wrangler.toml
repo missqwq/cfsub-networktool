@@ -1,0 +1,8 @@
+name = "edgetunnel-network-tool"
+main = "src/index.js"
+compatibility_date = "2026-11-04"
+
+# 创建 KV 命名空间后，填写对应 id：
+# [[kv_namespaces]]
+# binding = "WHITELIST"
+# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
