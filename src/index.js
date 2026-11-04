@@ -1,5 +1,8 @@
 const SESSION_COOKIE = "edgetunnel_admin";
-const SESSION_TTL = 60 * 60 * 8;
+// 会话版本用于使旧版长期 Cookie 立即失效。
+const SESSION_VERSION = "v2";
+// 管理后台短期登录有效期：30 分钟。到期后必须重新输入账号密码。
+const SESSION_TTL = 60 * 30;
 const WHITELIST_KEY = "subscription-domain-whitelist";
 
 /** @typedef {{ PASSWORD: string, WHITELIST: KVNamespace }} Env */
@@ -38,9 +41,10 @@ function nginxWelcome() {
 
 async function adminPage(request, env, headers) {
   if (!isConfigured(env)) return html(errorPage("未配置 PASSWORD", "请先在 Cloudflare Workers 的 Settings → Variables and Secrets 中添加文本变量 PASSWORD。"), 503, headers);
-  if (!hasValidSession(request, env)) return html(loginView(), 200, headers);
+  if (!hasValidSession(request, env)) return html(loginView(), 200, { ...headers, "Set-Cookie": expiredSessionCookie() });
   if (!env.WHITELIST) return html(errorPage("未绑定 KV", "请创建 KV 命名空间，并以 WHITELIST 绑定到该 Worker。"), 503, headers);
   const domains = await getWhitelist(env);
+  // 不滚动续期：登录后 30 分钟固定到期，到期后会重新显示账号密码登录页。
   return html(adminView(domains), 200, headers);
 }
 
@@ -53,12 +57,20 @@ async function login(request, env, headers) {
   const token = await makeSessionToken(env);
   return new Response(null, {
     status: 303,
-    headers: { ...headers, Location: "/admin", "Set-Cookie": `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_TTL}` },
+    headers: { ...headers, Location: "/admin", "Set-Cookie": sessionCookie(token) }, 
   });
 }
 
+function sessionCookie(token) {
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_TTL}`;
+}
+
+function expiredSessionCookie() {
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+}
+
 function logout(headers) {
-  return new Response(null, { status: 303, headers: { ...headers, Location: "/admin", "Set-Cookie": `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0` } });
+  return new Response(null, { status: 303, headers: { ...headers, Location: "/admin", "Set-Cookie": expiredSessionCookie() } });
 }
 
 async function whitelistApi(request, env, headers) {
@@ -147,7 +159,7 @@ function cookies(request) {
 
 async function makeSessionToken(env) {
   const expiry = Math.floor(Date.now() / 1000) + SESSION_TTL;
-  const payload = `admin.${expiry}`;
+  const payload = `${SESSION_VERSION}.admin.${expiry}`;
   return `${payload}.${await sign(payload, env.PASSWORD)}`;
 }
 
@@ -155,8 +167,9 @@ async function hasValidSession(request, env) {
   if (!isConfigured(env)) return false;
   const token = cookies(request)[SESSION_COOKIE];
   const parts = token?.split(".");
-  if (!parts || parts.length !== 3 || parts[0] !== "admin" || Number(parts[1]) < Math.floor(Date.now() / 1000)) return false;
-  return safeEqual(parts[2], await sign(`${parts[0]}.${parts[1]}`, env.PASSWORD));
+  // v2 格式要求：版本.账号.到期时间.签名；旧版三段式 Cookie 不再有效。
+  if (!parts || parts.length !== 4 || parts[0] !== SESSION_VERSION || parts[1] !== "admin" || !Number.isSafeInteger(Number(parts[2])) || Number(parts[2]) <= Math.floor(Date.now() / 1000)) return false;
+  return safeEqual(parts[3], await sign(`${parts[0]}.${parts[1]}.${parts[2]}`, env.PASSWORD));
 }
 
 async function sign(value, password) {
